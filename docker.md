@@ -1,152 +1,110 @@
 # Docker
 
-## Intro
+## Structure
 
-- Container is 3 features
-    1. Jailing the process (like virtual machines)
-    2. Namespaces
-    3. Cgroups (Control groups)
-- History: Bare Metal -> Virtual Machines -> Public Cloud (VPS) -> Containers
-- Containers info
-    - you are running copy of something, but not a full copy of it
-    - you don't have the whole cost of running the whole thing
-    - strong security boundaries (not as strong as VMs)
+- Crafting containers by hand
+    - what are containers
+    - chroot
+    - namespaces
+    - cgroups
+- Docker
+    - docker images
+    - docker images with docker
+    - javascript on docker
+    - tags
+    - docker cli
+- Dockerfiles
+    - intro
+    - build a node.js app
+    - expose
+    - layers
+- Making tiny containers
+    - alpine linux
+    - multi stage builds
+    - distroless
+    - static asset project
+- Docker features
+    - bind mounts
+    - volumes
+    - dev containers
+    - networking with docker
+- Multi container projects
+    - docker compose
+    - kubernetes
+    - kompose
+- Docker alternatives
 
-### Chroot (change root)
+## Crafting containers by hand
+
+- Container is combination of isolation + resource control
+    - chroot / jail → isolates filesystem view - `chroot /mnt/ubuntu /bin/bash`
+    - namespaces → isolate system resources like PID, network, UTS, mount, user, etc.
+    - cgroups (resource control) → limit and account for CPU, memory, I/O, etc.
+- Why containers
+    - Isolation – each app runs in its own environment → no dependency conflicts.
+    - Consistency – fixes “it works on my machine” by packaging app + deps.
+    - Efficiency – shares host OS kernel → lighter and faster than VMs (start in ms).
+    - Scalability & orchestration – easily deployed, replicated, and managed (e.g., Kubernetes).
+
+### Chroot
 
 ```bash
-docker ps # list all containers
+docker run -it --name docker-host --rm --privileged ubuntu:jammy
+docker exec -it docker-host bash
 
-# docker run - run an instance of the container
-# --it - make this interactive, don't just throw it in the background process (I want to interact with it directly)
-# --name docker-host - giving container a name, otherwise it will a random generated name
-# --rm - whenever I stop this container, throw everything away (don't keep the logs, all that stuff)
-# --privileged - normally, you don't want to do privileged, but because we are creating many things by hand, we want to give root privileges
-# ubuntu:jammy - ubuntu - distribution name, jammy - the actual version we will run
-docker run --it --name docker-host --rm --privileged ubuntu:jammy
-```
+cat /etc/issue # view linux version
+uname -a # even more info
+hostnamectl set-hostname smartenergy-gateway
 
-```bash
-cat /etc/issue # see OS system version on linux
-cat # open a file and read it for me
-
-mkdir /my-new-root
-
-# it will fail. It will change root, but since it can see only from itself and deeper, 
-# it cannot even see bash (need to bring it ourselves, can ignore all deps with no path printed)
+# changed root to a new folder, but there is no bash and /bin folder
 chroot /my-new-root bash
 
-ldd /bin/bash # list required libraries to run /bin/bash (like dll's on Windows)
-mkdir /my-new-root/lib{,64} /my-new-root/bin # or `mkdir /my-new-root/lib /my-new-root/lib64`
-cp /bin/bash /my-new-root/bin && 
-    cp /lib/aarch64-linux-gnu/libtinfo.so.6 my-new-root/lib && 
-    cp /lib/aarch64-linux-gnu/libc.so.6 my-new-root/lib && 
-    cp /lib/ld-linux-aarch64.so.1 my-new-root/lib
+# shows all dependencies (DLLs on windows) of bash
+# then need to copy all which have paths to new root folder
+ldd /bin/bash
 
-chroot /my-new-root bash
-
-cp /bin/ls my-new-root/bin/ && 
-    cp /lib/aarch64-linux-gnu/libselinux.so.1 \
-       /lib/aarch64-linux-gnu/libc.so.6 \
-       /lib/ld-linux-aarch64.so.1 \ 
-       /lib/aarch64-linux-gnu/libpcre2-8.so.0 \
-       my-new-root/lib
-
-cp /bin/cat my-new-root/bin/ && cp /lib/aarch64-linux-gnu/libc.so.6 /lib/ld-linux-aarch64.so.1 my-new-root/lib`
+cp /bin/bash /my-new-root/bin/bash
+cp /lib/dep1 /lib/dep2 /my-new-root/lib
+cp -r /lib /my-new-root # or just copy all deps
 ```
 
 ### Namespaces
 
-**Namespaces** allow you to hide processes from other processes
-
-After commands below all processes and resources were isolated
-    (ps aux from host and unshared environment, aka container, contained process)
-
 ```bash
-ps aux # list all processes
-
-chroot /my-new-root bash
-docker exec -it docker-host bash # connects to the container
-
 apt-get update -y
-apt-get install debootstrap -y # tool to install minimal version of Debian
+apt-get install debootstrap -y
+debootstrap --variant=minbase jammy /new-root # installs 150MB each time you run it
 
-# if you don't specify `--variant=minbase`, it will install the full copy, which is bigger
-debootstrap --variant=minbase jammy /better-root # (-150MB)
-
-# create new process, and inside create new namespaces for 
-# uts (unix time sharing), network, process ids, process forkings, user spaces
-unshare --mount --uts --ipc --net --pid --fork --user --map-root-user 
-
-chroot /better-root bash
-mount -t proc none /proc # tells linux there's a system to use, process namespaces
+# head into the new namespace'd, chroot'd environment
+unshare --mount --uts --ipc --net --pid --fork --user --map-root-user chroot /new-root bash # this also chroot's for us
+mount -t proc none /proc # process namespace
 mount -t sysfs none /sys # filesystem
 mount -t tmpfs none /tmp # filesystem
-
-tail -f /my-new-root &` - from host (to create a process)
 ```
 
 ### Cgroups
 
-**Cgroups (control groups)** - methodology of isolating resources, computing resources available to individual process trees
-
-cgroup v2 is now the standard.
-
 ```bash
-# should get 0 or 1, if more, you're on cgroup v1 (need to upgrade OS)
-grep -c cgroups /proc/mounts
+cd /sys/fs/cgroups
 
-cd /sys/fs/cgroup && ls && cat cpu.max
-mkdir sandbox && cd sandbox
+mkdir sandbox # automatically creates files
 
-# 8578 (ps aux first `bash` pid after unshare)
-echo 8578 > /sys/fs/cgroup/sandbox/cgroup.procs 
-# it will show all pids, except 8578, because process can belong only to one cgroup
-cat /sys/fs/cgroup/cgroup.procs 
+ps aux # grep PID of bash below unshare (we need to add it to sandbox pids)
+echo $PID > sandbox/cgroup.procs
 
-mkdir /sys/fs/cgroup/other-procs
-echo 8578 > /sys/fs/cgroup/other-procs/cgroup.procs # move all processes
+# we need to activate cgroup.subtree_controller, but we can't until there any active processes
+mkdir other-procs 
+echo $EACH_PID > other-procs/cgroup.procs # cat cgroup.procs
 
-# add the controllers, plus means add these. Only enable those controllers which are listed in cgroup.controllers 
-# echo "+cpuset +cpu +io +memory +pids" > /sys/fs/cgroup/cgroup.subtree_control
-# (you cannot do this if you have any processes, therefore we moved them)
+# add the controllers (some may cause errors, delete them)
 echo "+cpuset +cpu +io +memory +hugetlb +pids +rdma" > /sys/fs/cgroup/cgroup.subtree_control
+ls sandox # now there much more
 
-# now we have all controllers listed, because we made controllers available to child control groups
-ls sandbox 
-```
+apt-get install htop -y
 
-### Limiting resources with Cgroup
+# inside #1 / the cgroup/unshare – this will peg one core of a CPU at 100% of the resources available, see it peg 1 CPU
+yes > /dev/null
 
-> Container is just change root, namespaces, cgroups
-
-```bash
-apt-get install htop -y # visualizes all processes, how RAM is being used
-
-# run this from #1 terminal and watch it in htop to see it consume about a gig of RAM and 100% of CPU core
-yes | tr \\n x | head -c 1048576000 | grep n
-
-cat /sys/fs/cgroup/sandbox/memory.max # should see max, so the memory is unlimited
-echo 83886080 > /sys/fs/cgroup/sandbox/memory.max # set the limit to 80MB of RAM (the number is 80MB in bytes)
-yes | tr \\n x | head -c 1048576000 | grep n # now RAM is limited, CPU usage is limited as well
-
-yes /dev/null # taking 100% CPU (spamming yes)
-echo '5000 100000' > /sys/fs/cgroup/sandbox/cpu.max # giving CPU 5%
-
-# fork bomb
-fork() {
-    fork | fork &
-}
-fork
-
-# but you'll see it written as this
-# where : is the name of the function instead of fork
-:(){ :|:& };:
-
-# limit max processes cgroup can run at a time
-echo 3 > /sys/fs/cgroup/sandbox/pids.max
-
-# this runs 5 15 second processes that run and then stop. run this from within 
-# #2 and watch it work. now run it in #1 and watch it not be able to. it will have to retry several times
-for a in $(seq 1 5); do sleep 15 & done 
+# from #2 this allows the cgroup to only use 5% of a CPU
+echo '5000 100000' > /sys/fs/cgroup/sandbox/cpu.max
 ```
